@@ -1,0 +1,17 @@
+{
+  "name": "nabu-local-messaging",
+  "version": "1.0.0",
+  "description": "LAN chat CLI that discovers peers on port 33954",
+  "license": "ISC",
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": {
+    "nabu": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "bun src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2"
+  }
+}
