@@ -1,43 +1,47 @@
-import { PORT } from "../config";
-import { errorMessage } from "../util";
+import { APP_NAME, MAX_MESSAGE_LENGTH, PORT } from "../config";
+import { asTrimmedString, errorMessage } from "../util";
 import { Queue } from "../queue";
-import { handleInfo } from "./info";
-import {
-  invalidMessage,
-  parseIncomingMessage,
-  type IncomingMessage,
-} from "./message";
 import type { Identity } from "../models/settings";
 
-export type { IncomingMessage };
+export type IncomingMessage = {
+  fromId: string;
+  fromName: string;
+  text: string;
+  ip: string;
+};
 
-async function handleMessage(
-  request: Request,
-  server: ReturnType<typeof Bun.serve>,
-  incoming: Queue<IncomingMessage>
-): Promise<Response> {
-  try {
-    const message = await parseIncomingMessage(request, server);
+export class Server {
+  private identity: Identity;
+  private incoming = new Queue<IncomingMessage>();
 
-    if (message === null) {
-      return invalidMessage();
+  constructor(identity: Identity) {
+    this.identity = identity;
+  }
+
+  listen(): AsyncIterable<IncomingMessage> {
+    try {
+      Bun.serve({
+        port: PORT,
+        hostname: "0.0.0.0",
+        fetch: this.handleRequest.bind(this),
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      const portAlreadyUsed =
+        message.includes("in use") || message.includes("EADDRINUSE");
+
+      if (portAlreadyUsed) {
+        console.error(`Port ${PORT} is already in use.`);
+        process.exit(1);
+      }
+
+      throw error;
     }
 
-    incoming.push(message);
-    return Response.json({ ok: true });
-  } catch {
-    return invalidMessage();
+    return this.incoming;
   }
-}
 
-function notFound(): Response {
-  return Response.json({ error: "not found" }, { status: 404 });
-}
-
-export function startServer(identity: Identity): AsyncIterable<IncomingMessage> {
-  const incoming = new Queue<IncomingMessage>();
-
-  async function handleRequest(
+  private async handleRequest(
     request: Request,
     server: ReturnType<typeof Bun.serve>
   ): Promise<Response> {
@@ -47,34 +51,104 @@ export function startServer(identity: Identity): AsyncIterable<IncomingMessage> 
     const isPost = request.method === "POST";
 
     if (isGet && (path === "/" || path === "/info")) {
-      return handleInfo(identity);
+      return this.handleInfo();
     }
 
     if (isPost && path === "/message") {
-      return handleMessage(request, server, incoming);
+      return this.handleMessage(request, server);
     }
 
-    return notFound();
+    return this.notFound();
   }
 
-  try {
-    Bun.serve({
-      port: PORT,
-      hostname: "0.0.0.0",
-      fetch: handleRequest,
+  private handleInfo(): Response {
+    return Response.json({
+      app: APP_NAME,
+      id: this.identity.id,
+      name: this.identity.name,
     });
-  } catch (error) {
-    const message = errorMessage(error);
-    const portAlreadyUsed =
-      message.includes("in use") || message.includes("EADDRINUSE");
-
-    if (portAlreadyUsed) {
-      console.error(`Port ${PORT} is already in use.`);
-      process.exit(1);
-    }
-
-    throw error;
   }
 
-  return incoming;
+  private async handleMessage(
+    request: Request,
+    server: ReturnType<typeof Bun.serve>
+  ): Promise<Response> {
+    try {
+      const message = await this.parseIncomingMessage(request, server);
+
+      if (message === null) {
+        return this.invalidMessage();
+      }
+
+      this.incoming.push(message);
+      return Response.json({ ok: true });
+    } catch {
+      return this.invalidMessage();
+    }
+  }
+
+  private async parseIncomingMessage(
+    request: Request,
+    server: ReturnType<typeof Bun.serve>
+  ): Promise<IncomingMessage | null> {
+    const body = await request.json();
+
+    if (typeof body !== "object" || body === null) {
+      return null;
+    }
+
+    const data = body as {
+      text?: unknown;
+      fromId?: unknown;
+      fromName?: unknown;
+    };
+
+    const text = asTrimmedString(data.text);
+    const fromId = asTrimmedString(data.fromId);
+    let fromName = asTrimmedString(data.fromName);
+
+    if (fromName === "") {
+      fromName = "unknown";
+    }
+
+    const hasRequiredFields = fromId !== "" && text !== "";
+    const isTooLong = text.length > MAX_MESSAGE_LENGTH;
+
+    if (!hasRequiredFields || isTooLong) {
+      return null;
+    }
+
+    return {
+      fromId,
+      fromName,
+      text,
+      ip: this.getClientIp(server, request),
+    };
+  }
+
+  private getClientIp(
+    server: ReturnType<typeof Bun.serve>,
+    request: Request
+  ): string {
+    const info = server.requestIP(request);
+    let ip = "";
+
+    if (info !== null) {
+      ip = info.address;
+    }
+
+    if (ip.startsWith("::ffff:")) {
+      ip = ip.slice("::ffff:".length);
+    }
+
+    return ip;
+  }
+
+  private invalidMessage(): Response {
+    return Response.json({ error: "invalid message" }, { status: 400 });
+  }
+
+  private notFound(): Response {
+    return Response.json({ error: "not found" }, { status: 404 });
+  }
 }

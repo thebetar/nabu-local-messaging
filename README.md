@@ -16,7 +16,9 @@ last 4 hex  = 84a2
 84a2 → 33954
 ```
 
-Every peer listens on that port, and every minute Nabu scans the local network for other devices doing the same.
+On first start, Nabu asks for your name and which local networks to scan. It uses each interface's real CIDR, so a Docker bridge such as `172.18.0.0/16` is not treated as a /24. Small `/24` networks are selected by default because `/16` scans take much longer.
+
+Every peer listens on that port, and every minute Nabu scans the networks you chose for other devices doing the same.
 
 ## Run
 
@@ -31,12 +33,15 @@ bun start
 Once it is running you can:
 
 - `list` — show peers found on the network
+- `scan` — search the selected networks for peers now
+- `networks` — show interfaces and CIDRs
+- `networks 1,3` — choose which networks to scan
 - `chat <number>` — open a conversation with a peer
 - `history` — show stored conversations
 - `name <new-name>` — set the name other devices see
 - `help` — show commands
 - `quit` — exit
 
-In a chat, type a message and press Enter. Use `/back` to return to the menu.
+In a chat, type a message and press Enter. Type `q` to return to the menu.
 
 Chat history is stored in a local SQLite database (`data/nabu.db`), which is gitignored so it stays on your machine.

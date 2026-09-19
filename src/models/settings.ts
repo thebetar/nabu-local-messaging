@@ -10,56 +10,82 @@ type SettingRow = {
   value: string;
 };
 
-let db: Database;
-
-export function createTable(database: Database) {
-  db = database;
-
-  db.query(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    )
-  `).run();
-}
-
-function get(key: string): string | null {
-  const row = db
-    .query("SELECT value FROM settings WHERE key = ?")
-    .get(key) as SettingRow | null;
-
-  if (row === null) {
-    return null;
+export class Settings {
+  constructor(private db: Database) {
+    this.db.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `).run();
   }
 
-  return row.value;
-}
+  getIdentity(): Identity {
+    let id = this.get("id");
 
-function set(key: string, value: string) {
-  db.query(`
-    INSERT INTO settings (key, value)
-    VALUES (?, ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(key, value);
-}
+    if (id === null) {
+      id = crypto.randomUUID();
+      this.set("id", id);
+    }
 
-export function getIdentity(): Identity {
-  let id = get("id");
-  let name = get("name");
-
-  if (id === null) {
-    id = crypto.randomUUID();
-    set("id", id);
+    const storedName = this.get("name");
+    const name = storedName ?? (hostname() || "nabu-user");
+    return { id, name };
   }
 
-  if (name === null) {
-    name = hostname() || "nabu-user";
-    set("name", name);
+  hasName(): boolean {
+    return this.get("name") !== null;
   }
 
-  return { id, name };
-}
+  setName(name: string) {
+    this.set("name", name);
+  }
 
-export function setName(name: string) {
-  set("name", name);
+  hasNetworks(): boolean {
+    return this.get("networks") !== null;
+  }
+
+  getSelectedNetworks(): string[] {
+    const raw = this.get("networks");
+
+    if (raw === null) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+
+      return parsed.filter((item) => typeof item === "string");
+    } catch {
+      return [];
+    }
+  }
+
+  setSelectedNetworks(cidrs: string[]) {
+    this.set("networks", JSON.stringify(cidrs));
+  }
+
+  private get(key: string): string | null {
+    const row = this.db
+      .query("SELECT value FROM settings WHERE key = ?")
+      .get(key) as SettingRow | null;
+
+    if (row === null) {
+      return null;
+    }
+
+    return row.value;
+  }
+
+  private set(key: string, value: string) {
+    this.db.query(`
+      INSERT INTO settings (key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
+  }
 }

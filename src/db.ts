@@ -1,24 +1,28 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { createTable as createSettingsTable } from "./models/settings";
-import { createTable as createPeersTable } from "./models/peers";
-import { createTable as createMessagesTable } from "./models/messages";
+import { Settings } from "./models/settings";
+import { Peers } from "./models/peers";
+import { Messages } from "./models/messages";
 
 const dataDirectory = join(import.meta.dir, "..", "data");
 const databasePath = join(dataDirectory, "nabu.db");
 
-let db: Database;
+export class Store {
+  readonly settings: Settings;
+  readonly peers: Peers;
+  readonly messages: Messages;
+  private db: Database;
 
-export function init() {
-  mkdirSync(dataDirectory, { recursive: true });
-  db = new Database(databasePath);
+  constructor() {
+    mkdirSync(dataDirectory, { recursive: true });
+    this.db = new Database(databasePath);
+    this.settings = new Settings(this.db);
+    this.peers = new Peers(this.db);
+    this.messages = new Messages(this.db);
+  }
 
-  createSettingsTable(db);
-  createPeersTable(db);
-  createMessagesTable(db);
-}
-
-export function close() {
-  db.close();
+  close() {
+    this.db.close();
+  }
 }

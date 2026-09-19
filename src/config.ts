@@ -5,3 +5,4 @@ export const SCAN_CONCURRENCY = 64;
 export const PROBE_TIMEOUT_MS = 400;
 export const SEND_TIMEOUT_MS = 3000;
 export const MAX_MESSAGE_LENGTH = 4000;
+export const MIN_SCAN_PREFIX = 16;

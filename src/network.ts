@@ -1,6 +1,7 @@
 import { networkInterfaces } from "node:os";
 import {
   APP_NAME,
+  MIN_SCAN_PREFIX,
   PORT,
   PROBE_TIMEOUT_MS,
   SCAN_CONCURRENCY,
@@ -11,8 +12,78 @@ import { errorMessage, asTrimmedString } from "./util";
 import type { Identity } from "./models/settings";
 import type { Peer } from "./models/peers";
 
-export function getLocalIpAddresses(): string[] {
-  const addresses: string[] = [];
+export type LocalNetwork = {
+  cidr: string;
+  prefix: number;
+  hostCount: number;
+  ips: string[];
+  slow: boolean;
+};
+
+function ipv4ToInt(ip: string): number {
+  const parts = ip.split(".").map(Number);
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+function intToIpv4(value: number): string {
+  return [
+    (value >>> 24) & 255,
+    (value >>> 16) & 255,
+    (value >>> 8) & 255,
+    value & 255,
+  ].join(".");
+}
+
+function prefixFromNetmask(netmask: string): number {
+  const bits = ipv4ToInt(netmask);
+  let prefix = 0;
+
+  for (let i = 31; i >= 0; i--) {
+    if (((bits >>> i) & 1) === 0) {
+      break;
+    }
+
+    prefix += 1;
+  }
+
+  return prefix;
+}
+
+function prefixOf(address: string, netmask: string, cidr: string | null): number {
+  if (cidr !== null) {
+    const prefix = Number(cidr.split("/")[1]);
+
+    if (Number.isFinite(prefix)) {
+      return prefix;
+    }
+  }
+
+  return prefixFromNetmask(netmask);
+}
+
+function hostCountForPrefix(prefix: number): number {
+  const hostBits = 32 - prefix;
+
+  if (hostBits <= 0) {
+    return 1;
+  }
+
+  if (hostBits >= 31) {
+    return 2 ** hostBits;
+  }
+
+  return 2 ** hostBits - 2;
+}
+
+function networkCidr(address: string, prefix: number): string {
+  const shift = 32 - prefix;
+  const network =
+    prefix === 0 ? 0 : ((ipv4ToInt(address) >>> shift) << shift) >>> 0;
+  return `${intToIpv4(network)}/${prefix}`;
+}
+
+export function getLocalNetworks(): LocalNetwork[] {
+  const byCidr = new Map<string, LocalNetwork>();
   const interfaces = networkInterfaces();
 
   for (const addrs of Object.values(interfaces)) {
@@ -21,44 +92,106 @@ export function getLocalIpAddresses(): string[] {
     }
 
     for (const addr of addrs) {
-      const isIpv4 = addr.family === "IPv4";
-      const isRealNetwork = !addr.internal;
-
-      if (isIpv4 && isRealNetwork) {
-        addresses.push(addr.address);
+      if (addr.family !== "IPv4" || addr.internal) {
+        continue;
       }
+
+      const prefix = prefixOf(addr.address, addr.netmask, addr.cidr);
+      const cidr = networkCidr(addr.address, prefix);
+      const existing = byCidr.get(cidr);
+
+      if (existing) {
+        existing.ips.push(addr.address);
+        continue;
+      }
+
+      byCidr.set(cidr, {
+        cidr,
+        prefix,
+        hostCount: hostCountForPrefix(prefix),
+        ips: [addr.address],
+        slow: prefix < 24,
+      });
     }
   }
 
-  return addresses;
+  return [...byCidr.values()];
 }
 
-function getIpsOnSameSubnet(ourIp: string): string[] {
-  const parts = ourIp.split(".");
-  const first = Number(parts[0]);
-  const second = Number(parts[1]);
-  const third = Number(parts[2]);
-  const ourLast = Number(parts[3]);
-
+export function getLocalIpAddresses(): string[] {
   const ips: string[] = [];
 
-  for (let last = 1; last <= 254; last++) {
-    if (last === ourLast) {
-      continue;
+  for (const network of getLocalNetworks()) {
+    for (const ip of network.ips) {
+      ips.push(ip);
     }
-
-    ips.push(`${first}.${second}.${third}.${last}`);
   }
 
   return ips;
 }
 
-function collectIpsToScan(): string[] {
+function isTypicalHomeLan(network: LocalNetwork): boolean {
+  if (network.prefix < 24) {
+    return false;
+  }
+
+  const ip = network.ips[0];
+
+  if (!ip) {
+    return false;
+  }
+
+  const parts = ip.split(".").map(Number);
+  return parts[0] === 192 && parts[1] === 168;
+}
+
+export function defaultNetworkCidrs(): string[] {
+  const networks = getLocalNetworks();
+  const home = networks.filter(isTypicalHomeLan);
+
+  if (home.length > 0) {
+    return home.map((network) => network.cidr);
+  }
+
+  return networks
+    .filter((network) => network.prefix >= 24)
+    .map((network) => network.cidr);
+}
+
+function hostsInCidr(cidr: string, skipIps: Set<string>): string[] {
+  const [ip, prefixText] = cidr.split("/");
+  const prefix = Number(prefixText);
+  const hostBits = 32 - prefix;
+  const size = 2 ** hostBits;
+  const network = ipv4ToInt(ip);
+  const first = prefix >= 31 ? network : network + 1;
+  const last = prefix >= 31 ? network + size - 1 : network + size - 2;
+  const ips: string[] = [];
+
+  for (let value = first; value <= last; value++) {
+    const host = intToIpv4(value);
+
+    if (!skipIps.has(host)) {
+      ips.push(host);
+    }
+  }
+
+  return ips;
+}
+
+function collectIpsToScan(cidrs: string[]): string[] {
+  const skipIps = new Set(getLocalIpAddresses());
   const uniqueIps = new Set<string>();
 
-  for (const localIp of getLocalIpAddresses()) {
-    for (const neighborIp of getIpsOnSameSubnet(localIp)) {
-      uniqueIps.add(neighborIp);
+  for (const cidr of cidrs) {
+    const prefix = Number(cidr.split("/")[1]);
+
+    if (!Number.isFinite(prefix) || prefix < MIN_SCAN_PREFIX) {
+      continue;
+    }
+
+    for (const ip of hostsInCidr(cidr, skipIps)) {
+      uniqueIps.add(ip);
     }
   }
 
@@ -125,8 +258,8 @@ async function probeMany(ipAddresses: string[]): Promise<(Peer | null)[]> {
   return results;
 }
 
-export async function scanNetwork(): Promise<Peer[]> {
-  const ipsToScan = collectIpsToScan();
+export async function scanNetwork(cidrs: string[]): Promise<Peer[]> {
+  const ipsToScan = collectIpsToScan(cidrs);
 
   if (ipsToScan.length === 0) {
     return [];
@@ -166,12 +299,14 @@ export async function sendMessage(
   }
 }
 
-export async function* peerScans(): AsyncIterable<Peer[]> {
+export async function* peerScans(
+  getCidrs: () => string[]
+): AsyncIterable<Peer[]> {
   while (true) {
     const startedAt = Date.now();
 
     try {
-      yield await scanNetwork();
+      yield await scanNetwork(getCidrs());
     } catch (error) {
       console.error("scan failed:", errorMessage(error));
     }

@@ -1,40 +1,42 @@
 #!/usr/bin/env bun
 
-import * as db from "./db";
-import * as settings from "./models/settings";
-import * as storedPeers from "./models/peers";
-import { startServer, type IncomingMessage } from "./server";
-import { peerScans, getLocalIpAddresses } from "./network";
-import { createCli } from "./cli";
+import { Store } from "./db";
+import { Server, type IncomingMessage } from "./server";
+import { peerScans } from "./network";
+import { Cli } from "./cli";
+
+let store: Store | undefined;
 
 async function main() {
-  db.init();
+  store = new Store();
 
-  const identity = settings.getIdentity();
-  const cli = createCli(identity);
-  const incomingMessages = startServer(identity);
+  const identity = store.settings.getIdentity();
+  const cli = new Cli(identity, store);
 
-  cli.start(getLocalIpAddresses());
+  await cli.start();
+
+  const server = new Server(identity);
+  const incomingMessages = server.listen();
 
   await Promise.all([
     forwardMessages(incomingMessages, cli),
-    forwardPeers(cli),
+    forwardPeers(store, cli),
   ]);
 }
 
 async function forwardMessages(
   incomingMessages: AsyncIterable<IncomingMessage>,
-  cli: ReturnType<typeof createCli>
+  cli: Cli
 ) {
   for await (const message of incomingMessages) {
     cli.receive(message);
   }
 }
 
-async function forwardPeers(cli: ReturnType<typeof createCli>) {
-  for await (const found of peerScans()) {
+async function forwardPeers(store: Store, cli: Cli) {
+  for await (const found of peerScans(() => store.settings.getSelectedNetworks())) {
     for (const peer of found) {
-      storedPeers.upsert(peer);
+      store.peers.upsert(peer);
     }
 
     cli.updatePeers(found);
@@ -42,7 +44,7 @@ async function forwardPeers(cli: ReturnType<typeof createCli>) {
 }
 
 function shutdown() {
-  db.close();
+  store?.close();
   process.exit(0);
 }
 
